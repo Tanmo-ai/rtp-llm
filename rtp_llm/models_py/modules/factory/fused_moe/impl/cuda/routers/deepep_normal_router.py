@@ -105,17 +105,10 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
         )
         quant_method = MoeConfigResolver().get_quant_method(self.config)
         use_fp4 = quant_method == "modelopt_fp4"
-        if use_fp8:
-            a1_quant, a1_scale_quant = self._do_quant(a1)
-            assert a1_scale_quant is not None
-            tp_expert_a1 = torch.narrow(a1_quant, 0, slice_begin, slice_size)
-            tp_expert_a1_scale = torch.narrow(
-                a1_scale_quant, 0, slice_begin, slice_size
-            )
-            tp_expert_input = (tp_expert_a1, tp_expert_a1_scale)
-        else:
-            tp_expert_a1 = torch.narrow(a1, 0, slice_begin, slice_size)
-            tp_expert_input = tp_expert_a1
+        tp_expert_input = self._prepare_dispatch_input(
+            a1, slice_begin, slice_size, use_fp8
+        )
+        uses_quantized_dispatch = isinstance(tp_expert_input, tuple)
 
         # pre dispatch
         tp_expert_ids = torch.narrow(topk_ids, 0, slice_begin, slice_size).to(
@@ -155,11 +148,11 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
 
         expert_x_scale: Optional[torch.Tensor] = None
         expert_x: torch.Tensor
-        if use_fp8:
+        if uses_quantized_dispatch:
             assert isinstance(output, tuple), "output should be a tuple"
             expert_x, expert_x_scale = output
             # TODO: move it to the executor
-            if self.quant_config.is_per_act_token:
+            if use_fp8 and self.quant_config.is_per_act_token:
                 expert_x_scale = expert_x_scale[:, 0].contiguous()
         else:
             assert isinstance(output, torch.Tensor), "output should be a tensor"
@@ -188,6 +181,22 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
                 expert_num_tokens=expert_num_tokens,
                 expert_num_tokens_cpu=num_recv_tokens_per_expert_list,
             ),
+        )
+
+    def _prepare_dispatch_input(
+        self,
+        a1: torch.Tensor,
+        slice_begin: int,
+        slice_size: int,
+        use_fp8: bool,
+    ) -> torch.Tensor | Tuple[torch.Tensor, torch.Tensor]:
+        if not use_fp8:
+            return torch.narrow(a1, 0, slice_begin, slice_size)
+        a1_quant, a1_scale_quant = self._do_quant(a1)
+        assert a1_scale_quant is not None
+        return (
+            torch.narrow(a1_quant, 0, slice_begin, slice_size),
+            torch.narrow(a1_scale_quant, 0, slice_begin, slice_size),
         )
 
     def finalize(

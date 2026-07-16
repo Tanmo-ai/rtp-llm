@@ -169,6 +169,9 @@ class GenericMoeLayer(nn.Module):
         use_ep_shared_allreduce = (
             self.shared_expert is not None and self.ffn_tp_size > 1 and is_ep_mode
         )
+        defer_output_allreduce = getattr(
+            self.fused_moe.router, "defer_output_allreduce", False
+        )
 
         experts_output = self.fused_moe(
             hidden_states=hidden_states,
@@ -179,9 +182,20 @@ class GenericMoeLayer(nn.Module):
         if self.shared_expert is not None:
             shared_expert_output = self.shared_expert(
                 hidden_states,
-                skip_allreduce=use_ep_shared_allreduce,
+                skip_allreduce=use_ep_shared_allreduce or defer_output_allreduce,
             )
-            if use_ep_shared_allreduce:
+            if defer_output_allreduce:
+                # Pure TP: preserve local partials until routed and shared
+                # outputs are combined, then reduce once (vLLM semantics).
+                if self.shared_expert_gate is not None:
+                    gate_output = self.shared_expert_gate(hidden_states)
+                    self.sigmoid_gate_scale_add(
+                        gate_output, shared_expert_output, experts_output
+                    )
+                else:
+                    experts_output = experts_output + shared_expert_output
+                experts_output = all_reduce(experts_output, group=Group.TP)
+            elif use_ep_shared_allreduce:
                 # EP mode: routed expert output is already complete
                 # (EP combine via all_to_all / all_gather aggregated across ranks).
                 # Only the shared expert output is TP-partial and needs all_reduce.
@@ -202,6 +216,8 @@ class GenericMoeLayer(nn.Module):
                     )
                 else:
                     experts_output = experts_output + shared_expert_output
+        elif defer_output_allreduce:
+            experts_output = all_reduce(experts_output, group=Group.TP)
 
         return experts_output
 

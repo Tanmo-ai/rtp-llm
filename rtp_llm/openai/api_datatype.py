@@ -391,7 +391,7 @@ class ChatCompletionStreamResponse(BaseModel):
     id: str = Field(default_factory=lambda: f"chat")
     object: str = "chat.completion.chunk"
     created: int = Field(default_factory=lambda: int(time.time()))
-    model: Optional[str] = None
+    model: str = ""
     choices: List[ChatCompletionResponseStreamChoice]
     usage: Optional[UsageInfo] = Field(default=None)
     debug_info: Optional[Union[DebugInfo, str]] = None

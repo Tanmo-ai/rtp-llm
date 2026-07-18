@@ -80,3 +80,6 @@ docs/index/dist/
 
 # Local analysis reports
 *_analysis_report.md
+
+# Local evaluation service output
+eval_server_logs/

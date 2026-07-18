@@ -14,7 +14,10 @@ from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.distribute.distributed_server import DistributedServer, get_world_info
 from rtp_llm.metrics import kmonitor
 from rtp_llm.model_factory import ModelFactory
-from rtp_llm.models_py.distributed.collective_torch import init_distributed_environment
+from rtp_llm.models_py.distributed.collective_torch import (
+    destroy_distributed_environment,
+    init_distributed_environment,
+)
 from rtp_llm.utils.concurrency_controller import get_global_controller
 from rtp_llm.utils.fuser import _nfs_manager
 
@@ -40,6 +43,7 @@ class BackendManager(object):
             kmonitor.init()
         self.engine: Optional[BaseEngine] = None
         self._shutdown_requested = threading.Event()
+        self._stopped = threading.Event()
 
     def start(self):
         """Initialize backend server without entering service loop"""
@@ -170,10 +174,39 @@ class BackendManager(object):
 
     def stop(self) -> None:
         """Stop the backend manager and cleanup resources"""
-        if isinstance(self.engine, BaseEngine):
+        if self._stopped.is_set():
+            logging.info("BackendManager already stopped")
+            return
+        self._stopped.set()
+        engine = self.engine
+        self.engine = None
+        try:
+            if isinstance(engine, BaseEngine):
+                logging.info("stopping backend engine before unmounting nfs paths")
+                engine.stop()
+                logging.info("backend engine stopped")
+        finally:
+            try:
+                from rtp_llm.models_py.distributed.deepep_wrapper import (
+                    DeepEPWrapper,
+                )
+
+                if DeepEPWrapper.is_initialized():
+                    DeepEPWrapper.reset()
+                    logging.info("DeepEP buffer destroyed")
+            except Exception:
+                logging.exception("Failed to destroy DeepEP buffer")
+
+            try:
+                import torch
+
+                if torch.distributed.is_initialized():
+                    destroy_distributed_environment()
+            except Exception:
+                logging.exception("Failed to destroy distributed environment")
+
             _nfs_manager.unmount_all()
             logging.info("all nfs paths unmounted")
-            self.engine.stop()
 
     def ready(self):
         if isinstance(self.engine, BaseEngine):

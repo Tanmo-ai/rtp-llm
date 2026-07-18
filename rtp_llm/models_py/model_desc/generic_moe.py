@@ -187,9 +187,13 @@ class GenericMoeLayer(nn.Module):
                 # outputs are combined, then reduce once (vLLM semantics).
                 if self.shared_expert_gate is not None:
                     gate_output = self.shared_expert_gate(hidden_states)
-                    self.sigmoid_gate_scale_add(
-                        gate_output, shared_expert_output, experts_output
+                    # Materialize each BF16 elementwise step before the local
+                    # routed/shared sum, then reduce once (vLLM late-reduce
+                    # semantics) instead of the fused sigmoid-gate scale-add.
+                    shared_expert_output = (
+                        torch.sigmoid(gate_output) * shared_expert_output
                     )
+                    experts_output = experts_output + shared_expert_output
                 else:
                     experts_output = experts_output + shared_expert_output
                 experts_output = all_reduce(experts_output, group=Group.TP)

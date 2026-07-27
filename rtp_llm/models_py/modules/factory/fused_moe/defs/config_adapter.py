@@ -7,7 +7,7 @@ from typing import Optional
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.quant_config import QuantizationConfig
-from rtp_llm.ops import MoeConfig, ParallelismConfig
+from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 
 
 class MoEConfigAdapter:
@@ -23,6 +23,8 @@ class MoEConfigAdapter:
         moe_config: Optional[MoeConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         enable_cuda_graph: bool = False,
+        hw_kernel_config: Optional[HWKernelConfig] = None,
+        max_generate_batch_size: Optional[int] = None,
     ):
         self.model_config = model_config
         self.parallelism_config = parallelism_config
@@ -57,6 +59,8 @@ class MoEConfigAdapter:
         self.use_mori_ep = moe_config.use_mori_ep
         self.use_deepep_moe = moe_config.use_deepep_moe
         self.enable_cuda_graph = enable_cuda_graph
+        self.hw_kernel_config = hw_kernel_config
+        self.max_generate_batch_size = max_generate_batch_size
 
     @property
     def activation_type(self):

@@ -163,6 +163,11 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
     if (!has_tagged_cache) {
         // clear kv_cache_kernel_block_id_device, otherwise it will cause the cache block pollution
         py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device.fill_(0);
+        // The host table must be cleared with the device one. Attention backends rebuild
+        // slot_mapping / page_indice from the host rows (FlashInferMlaAttnParams::fillParams),
+        // so rows left over from a previous replay would map padded tokens onto real blocks.
+        // Padded rows then resolve to block 0, which BlockPool reserves.
+        py_model_inputs_.attention_inputs.kv_cache_kernel_block_id.fill_(0);
     }
 
     // NOTE: kv_cache_block_id_{host,device} are physical block IDs dedicated for cache store

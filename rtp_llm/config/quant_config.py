@@ -170,8 +170,18 @@ class QuantizationConfig(ABC):
                 quant_method = Fp8BlockWiseQuantConfig.get_method()
         if quant_method == "compressed-tensors":
             config_groups = quant_config["config_groups"]
-            weights_config = config_groups["group_0"]["weights"]
-            activation_config = config_groups["group_0"]["input_activations"]
+            if not config_groups:
+                raise ValueError("compressed-tensors config_groups must not be empty")
+            if len(config_groups) > 1:
+                raise ValueError(
+                    "compressed-tensors with multiple config_groups is not supported, "
+                    f"got {sorted(config_groups)}"
+                )
+            # Group names are checkpoint-defined (for example ``W8A8``), so they
+            # cannot be assumed to use compressed-tensors' historical group_0.
+            group_name, group_config = next(iter(config_groups.items()))
+            weights_config = group_config["weights"]
+            activation_config = group_config["input_activations"]
             bits = weights_config["num_bits"]
             if (
                 weights_config["type"] == "float"
@@ -194,6 +204,36 @@ class QuantizationConfig(ABC):
                         "dynamic": activation_config["dynamic"],
                         "act_scale_suffix": ".input_scale",
                         "weight_scale_suffix": ".weight_scale",
+                    }
+                )
+            elif (
+                weights_config["type"] == "int"
+                and bits == 8
+                and weights_config["strategy"] == "channel"
+                and not weights_config.get("dynamic", False)
+                and activation_config["type"] == "int"
+                and activation_config["num_bits"] == 8
+                and activation_config["strategy"] == "token"
+                and activation_config.get("dynamic", False)
+            ):
+                if not weights_config.get(
+                    "symmetric", True
+                ) or not activation_config.get("symmetric", True):
+                    raise ValueError(
+                        f"compressed-tensors group {group_name} uses asymmetric INT8, "
+                        "but only symmetric W8A8 is supported"
+                    )
+                ignore_patterns = quant_config.get(
+                    "ignore", quant_config.get("exclude", [])
+                )
+                quant_method = CompressedW8A8Int8PerChannelQuantConfig.get_method()
+                return CompressedW8A8Int8PerChannelQuantConfig.from_config(
+                    {
+                        "bits": bits,
+                        "method": quant_method,
+                        "group_size": 0,
+                        "is_quanted": True,
+                        "ignore_patterns": ignore_patterns,
                     }
                 )
             elif (
@@ -803,6 +843,65 @@ class CompressedW4A8Int4PerChannelQuantConfig(QuantizationConfig):
         return CompressedW4A8Int4PerChannelQuantConfig(**config)
 
 
+class CompressedW8A8Int8PerChannelQuantConfig(QuantizationConfig):
+    """Pre-quantized compressed-tensors W8A8 INT8 configuration.
+
+    Weights are static symmetric INT8 per output channel and activations are
+    dynamically quantized to symmetric INT8 per token.
+    """
+
+    DEFAULT_WEIGHT_SUFFIX = ".weight"
+    DEFAULT_SCALE_SUFFIX = ".weight_scale"
+
+    def __init__(
+        self,
+        bits: int = 8,
+        group_size: int = 0,
+        is_quanted: bool = True,
+        **kwargs: Any,
+    ):
+        assert (
+            bits == 8 and group_size == 0
+        ), f"invalid params {bits} != 8 or {group_size} != 0"
+        super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
+        self._weight_suffix = kwargs.get("weight_suffix", self.DEFAULT_WEIGHT_SUFFIX)
+        self._scale_suffix = kwargs.get("scale_suffix", self.DEFAULT_SCALE_SUFFIX)
+        self._ignore_patterns: List[str] = list(kwargs.get("ignore_patterns", []))
+        # WeightModule support checks use exclude_modules for concrete checkpoint
+        # paths and {i}-templated model weight definitions.
+        self.exclude_modules = set(self._ignore_patterns)
+
+    @classmethod
+    def get_method(cls) -> str:
+        return "W8A8_INT8_PER_CHANNEL_COMPRESSED"
+
+    @classmethod
+    def get_algo(cls) -> str:
+        return "w8a8_int8_per_channel"
+
+    @property
+    def weight_suffix(self) -> str:
+        return self._weight_suffix
+
+    @property
+    def scale_suffix(self) -> str:
+        return self._scale_suffix
+
+    @property
+    def ignore_patterns(self) -> List[str]:
+        return self._ignore_patterns
+
+    def get_supported_compute_dtypes(self) -> List[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    @classmethod
+    def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
+        return CompressedW8A8Int8PerChannelQuantConfig(**config)
+
+
 DEFAULT_FP8_BLOCK_WISE_QUANT_CONFIG = Fp8BlockWiseQuantConfig(
     bits=8,
     group_size=Fp8BlockWiseQuantConfig.DEFAULT_FP8_QUANT_BLOCK_SIZE,
@@ -831,6 +930,10 @@ DEFAULT_COMPRESSED_W4A8_INT4_PER_CHANNEL_QUANT_CONFIG = (
     CompressedW4A8Int4PerChannelQuantConfig(bits=4, group_size=32, is_quanted=True)
 )
 
+DEFAULT_COMPRESSED_W8A8_INT8_PER_CHANNEL_QUANT_CONFIG = (
+    CompressedW8A8Int8PerChannelQuantConfig(bits=8, group_size=0, is_quanted=True)
+)
+
 preset_quant_config = {
     "INT8": DEFAULT_WEIGHT_ONLY_INT8_PER_CHANNEL_QUANT_CONFIG,
     "FP8": DEFAULT_FP8_PER_TENSOR_QUANT_CONFIG,
@@ -843,6 +946,9 @@ preset_quant_config = {
     "W4A8_INT4_PER_CHANNEL": DEFAULT_W4A8_INT4_PER_CHANNEL_QUANT_CONFIG,
     "W4A8_INT4_PER_CHANNEL_COMPRESSED": (
         DEFAULT_COMPRESSED_W4A8_INT4_PER_CHANNEL_QUANT_CONFIG
+    ),
+    "W8A8_INT8_PER_CHANNEL_COMPRESSED": (
+        DEFAULT_COMPRESSED_W8A8_INT8_PER_CHANNEL_QUANT_CONFIG
     ),
 }
 

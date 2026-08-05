@@ -145,3 +145,13 @@ py_test(
     ],
     exec_properties = {'gpu':'A10'}
 )
+
+py_test(
+    name = "backend_registry_test",
+    srcs = [
+        "backend_registry_test.py",
+    ],
+    deps = [
+        "//rtp_llm:utils",
+    ],
+)

@@ -23,7 +23,22 @@ from .ops import *
 
 
 if has_internal_source():
-    import internal_source.rtp_llm.models_py
+    # The frontend-only (slim) image ships a partial internal_source tree
+    # (tokenizers / openai_renderers) but not internal_source.rtp_llm.models_py,
+    # so has_internal_source() can be True while this submodule is absent.
+    # models_py only holds model-execution / backend kernel registrations the
+    # frontend never runs, so a missing module must degrade gracefully instead
+    # of crashing the process at import time.
+    try:
+        import internal_source.rtp_llm.models_py
+    except ImportError as e:
+        import logging
+
+        logging.warning(
+            "internal_source.rtp_llm.models_py unavailable, skipping "
+            "(expected on frontend slim image): %s",
+            e,
+        )
 
 
 consume_s = time.time() - st

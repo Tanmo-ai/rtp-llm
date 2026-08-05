@@ -103,9 +103,13 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
             self.quant_config.is_quantized
             and self.quant_config.quant_dtype == torch.float8_e4m3fn
         )
+        use_int8 = (
+            self.quant_config.is_quantized
+            and self.quant_config.quant_dtype == torch.int8
+        )
         quant_method = MoeConfigResolver().get_quant_method(self.config)
         use_fp4 = quant_method == "modelopt_fp4"
-        if use_fp8:
+        if use_fp8 or use_int8:
             a1_quant, a1_scale_quant = self._do_quant(a1)
             assert a1_scale_quant is not None
             tp_expert_a1 = torch.narrow(a1_quant, 0, slice_begin, slice_size)
@@ -155,11 +159,13 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
 
         expert_x_scale: Optional[torch.Tensor] = None
         expert_x: torch.Tensor
-        if use_fp8:
+        if use_fp8 or use_int8:
             assert isinstance(output, tuple), "output should be a tuple"
             expert_x, expert_x_scale = output
             # TODO: move it to the executor
-            if self.quant_config.is_per_act_token:
+            # FP8 per-token scales are repeated per 128-column block by
+            # _do_quant_fp8_per_token; INT8 keeps one scale per token.
+            if use_fp8 and self.quant_config.is_per_act_token:
                 expert_x_scale = expert_x_scale[:, 0].contiguous()
         else:
             assert isinstance(output, torch.Tensor), "output should be a tensor"

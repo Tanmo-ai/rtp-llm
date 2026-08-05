@@ -13,6 +13,9 @@ from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     scaled_fp8_per_token_quant,
     sgl_per_token_group_quant_fp8,
 )
+from rtp_llm.models_py.triton_kernels.common.int8_quant import (
+    per_token_quant_int8,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -240,6 +243,11 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
         self, a1: torch.Tensor
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         if (
+            self.quant_config.quant_dtype == torch.int8
+            and self.quant_config.is_per_act_token
+        ):
+            return per_token_quant_int8(a1)
+        elif (
             self.quant_config.quant_dtype == torch.float8_e4m3fn
             and self.quant_config.is_per_act_token
         ):

@@ -163,6 +163,15 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
     if (!has_tagged_cache) {
         // clear kv_cache_kernel_block_id_device, otherwise it will cause the cache block pollution
         py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device.fill_(0);
+        // The host mirror must be cleared with it. fillParams walks every row up to the graph
+        // batch size and dereferences this table for current_page_num pages, where
+        // current_page_num is derived from input_lengths + prefix_lengths. Zeroing those for the
+        // padding suffix happens to make current_page_num 0 for backends that leave them zero,
+        // but a backend that needs a uniform input_lengths across the captured batch (PPU FA3
+        // keeps cu_seqlens graph-stable that way) puts the dereference back. A padding row would
+        // then pick up a previous replay's block ID and route its KV write into a live request's
+        // block. Cleared rows resolve to block 0, which BlockPool reserves and never hands out.
+        py_model_inputs_.attention_inputs.kv_cache_kernel_block_id.fill_(0);
     }
 
     // NOTE: kv_cache_block_id_{host,device} are physical block IDs dedicated for cache store

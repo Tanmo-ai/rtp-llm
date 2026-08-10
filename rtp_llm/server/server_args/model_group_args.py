@@ -98,3 +98,11 @@ def init_model_group_args(parser, model_args):
             "LM head. Flat or grouped token strings/IDs form one static set."
         ),
     )
+    model_group.add_argument(
+        "--enable_independent_kv_cache_pools",
+        env_name="ENABLE_INDEPENDENT_KV_CACHE_POOLS",
+        bind_to=(model_args, "enable_independent_kv_cache_pools"),
+        type=str2bool,
+        default=None,
+        help="是否为混合注意力模型的各KV cache group创建独立显存池，默认关闭",
+    )

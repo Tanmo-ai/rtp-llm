@@ -92,6 +92,7 @@ class ServerArgsSetTest(TestCase):
         os.environ["WARM_UP"] = "1"
         os.environ["MAX_SEQ_LEN"] = "4096"
         os.environ["REMOTE_JIT_DIR"] = "dfs://bucket/jit/cache"
+        os.environ["ENABLE_INDEPENDENT_KV_CACHE_POOLS"] = "true"
         os.environ["FRONTEND_PRE_STOP_DRAIN_SECONDS"] = "2.5"
         os.environ["DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS"] = "9"
         os.environ["LOADER_RECYCLE_HANDLES"] = "false"
@@ -113,6 +114,7 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(py_env_configs.model_args.model_type, "qwen")
         self.assertEqual(py_env_configs.model_args.ckpt_path, "/path/to/checkpoint")
         self.assertEqual(py_env_configs.model_args.act_type, "BF16")
+        self.assertTrue(py_env_configs.model_args.enable_independent_kv_cache_pools)
 
         # Verify parallelism_config
         self.assertEqual(py_env_configs.parallelism_config.tp_size, 4)
@@ -233,6 +235,8 @@ class ServerArgsSetTest(TestCase):
             "true",
             "--disable_flashinfer_hybrid_prefill",
             "true",
+            "--enable_independent_kv_cache_pools",
+            "true",
             # Note: max_seq_len is in ModelConfig, not ModelArgs
             # It will be set when ModelConfig is created from model_args
         ]
@@ -249,6 +253,7 @@ class ServerArgsSetTest(TestCase):
             py_env_configs.model_args.ckpt_path, "/path/to/llama/checkpoint"
         )
         self.assertEqual(py_env_configs.model_args.act_type, "FP16")
+        self.assertTrue(py_env_configs.model_args.enable_independent_kv_cache_pools)
 
         # Verify parallelism_config
         self.assertEqual(py_env_configs.parallelism_config.tp_size, 8)

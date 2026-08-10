@@ -30,6 +30,7 @@ class ModelArgs:
         "phy2log_path",
         "enable_fp32_lm_head",
         "enable_output_vocab_pruning",
+        "enable_independent_kv_cache_pools",
     ]
 
     def __init__(self):
@@ -61,3 +62,6 @@ class ModelArgs:
         # LM head precision
         self.enable_fp32_lm_head: Optional[bool] = None
         self.enable_output_vocab_pruning: bool = False
+
+        # KV cache pool layout
+        self.enable_independent_kv_cache_pools: Optional[bool] = None

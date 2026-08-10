@@ -87,6 +87,34 @@ class StrategyRegistry:
         # Sort candidates by priority (descending, higher priority first)
         candidates.sort(key=lambda s: s.priority, reverse=True)
 
+        # A pre-quantized checkpoint whose activation format no candidate
+        # produces would otherwise be picked up by an unquantized fallback and
+        # fail deep inside a kernel, so reject the combination here. Granularity
+        # is part of the contract: an INT8 per-tensor strategy must not satisfy a
+        # scheme that needs INT8 per token.
+        model_quant_config = config.model_config.quant_config
+        required_act_spec = (
+            model_quant_config.get_moe_activation_quant_spec()
+            if model_quant_config is not None
+            else None
+        )
+        if required_act_spec is not None:
+            provided_specs = {
+                (attrs.quant_config.quant_dtype, attrs.quant_config.per_act_token_quant)
+                for attrs in (strategy.get_attributes() for strategy in candidates)
+            }
+            if required_act_spec not in provided_specs:
+                dtype, per_act_token = required_act_spec
+                raise ValueError(
+                    f"Quantization method {model_quant_config.get_method()} needs a "
+                    f"MOE strategy producing {dtype} activations "
+                    f"({'per token' if per_act_token else 'not per token'}), but "
+                    f"none of the {len(candidates)} candidate strategy(ies) does "
+                    f"(they provide {sorted(map(str, provided_specs))}). MOE layers "
+                    "cannot serve this checkpoint: use a dense model, choose "
+                    "another quantization method, or register a strategy for it."
+                )
+
         # Log all candidate strategies
         logger.info(f"Found {len(candidates)} candidate strategy(ies) for MOE:")
         for strategy in candidates:

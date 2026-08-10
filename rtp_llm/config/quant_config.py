@@ -1,11 +1,91 @@
 import json
+import logging
 import os
 import weakref
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
+
+# Fields a compressed-tensors group uses to describe one quantization scheme.
+_SCHEME_FIELDS = (
+    "type",
+    "num_bits",
+    "strategy",
+    "dynamic",
+    "symmetric",
+    "group_size",
+)
+
+
+def _scheme_key(spec: Any) -> Optional[Tuple[Any, ...]]:
+    if not isinstance(spec, dict):
+        return None
+    return tuple(spec.get(field) for field in _SCHEME_FIELDS)
+
+
+def _pick_single_config_group(
+    config_groups: Dict[str, Any]
+) -> Tuple[str, Dict[str, Any]]:
+    """Resolve the config group a compressed-tensors checkpoint describes.
+
+    Group names are checkpoint-defined (Qwen3.5 ships ``W8A8``), so the
+    historical ``group_0`` cannot be assumed. To keep every checkpoint that
+    loads today loading unchanged, ``group_0`` still wins whenever it is present
+    and the other groups only produce a warning. A conflict is rejected only when
+    there is no ``group_0`` to fall back on, which is a checkpoint the previous
+    hardcoded lookup could not read at all.
+    """
+    if not config_groups:
+        raise ValueError("compressed-tensors config_groups must not be empty")
+    if "group_0" in config_groups:
+        if len(config_groups) > 1:
+            logging.warning(
+                "compressed-tensors declares %d config_groups %s; reading group_0 "
+                "and ignoring the rest, as before",
+                len(config_groups),
+                sorted(config_groups),
+            )
+        return "group_0", config_groups["group_0"]
+    if len(config_groups) > 1:
+        schemes = {
+            name: (
+                _scheme_key(group.get("weights")),
+                _scheme_key(group.get("input_activations")),
+            )
+            for name, group in config_groups.items()
+        }
+        if len(set(schemes.values())) > 1:
+            raise ValueError(
+                "compressed-tensors config_groups declare conflicting schemes and "
+                "none is named group_0: "
+                + ", ".join(f"{name}={schemes[name]}" for name in sorted(schemes))
+            )
+        logging.warning(
+            "compressed-tensors declares %d config_groups with an identical "
+            "scheme %s; loading them as one group",
+            len(config_groups),
+            sorted(config_groups),
+        )
+    preferred = sorted(config_groups)[0]
+    return preferred, config_groups[preferred]
+
+
+def _read_ignore_patterns(
+    quant_config: Dict[str, Any], keys: Tuple[str, ...] = ("ignore",)
+) -> List[str]:
+    """Read an excluded-module list, tolerating an explicitly null value.
+
+    ``keys`` is per call site so no branch silently starts honouring a key it did
+    not read before; the shared part is only the ``null``/non-list normalization
+    that used to make ``list(None)`` raise TypeError.
+    """
+    for key in keys:
+        patterns = quant_config.get(key)
+        if patterns:
+            return list(patterns)
+    return []
 
 
 class QuantizationType(str, Enum):
@@ -51,6 +131,18 @@ class QuantizationConfig(ABC):
     def get_supported_compute_dtypes(self) -> List[torch.dtype]:
         """List of supported activation dtypes."""
         raise NotImplementedError
+
+    def get_moe_activation_quant_spec(self) -> Optional[Tuple[torch.dtype, bool]]:
+        """``(dtype, per_act_token)`` a MoE strategy must produce for this scheme.
+
+        ``None`` -- the default -- means MoE layers may keep activations
+        unquantized, which covers weight-only schemes and every scheme whose MoE
+        executors derive the activation format themselves. A scheme that returns a
+        spec is rejected at strategy selection unless some registered strategy
+        actually produces that dtype *at that granularity*, so an unwired
+        combination fails at startup instead of deep inside a kernel.
+        """
+        return None
 
     @abstractmethod
     def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
@@ -169,9 +261,11 @@ class QuantizationConfig(ABC):
                 group_size = weight_block[0]
                 quant_method = Fp8BlockWiseQuantConfig.get_method()
         if quant_method == "compressed-tensors":
-            config_groups = quant_config["config_groups"]
-            weights_config = config_groups["group_0"]["weights"]
-            activation_config = config_groups["group_0"]["input_activations"]
+            group_name, group_config = _pick_single_config_group(
+                quant_config["config_groups"]
+            )
+            weights_config = group_config["weights"]
+            activation_config = group_config["input_activations"]
             bits = weights_config["num_bits"]
             if (
                 weights_config["type"] == "float"
@@ -198,12 +292,46 @@ class QuantizationConfig(ABC):
                 )
             elif (
                 weights_config["type"] == "int"
+                and bits == 8
+                and weights_config["strategy"] == "channel"
+                and not weights_config.get("dynamic", False)
+                # Weight-only INT8 checkpoints leave input_activations null; they
+                # fall through to the generic paths below instead of subscripting
+                # a None here.
+                and isinstance(activation_config, dict)
+                and activation_config["type"] == "int"
+                and activation_config["num_bits"] == 8
+                and activation_config["strategy"] == "token"
+                and activation_config.get("dynamic", False)
+            ):
+                if not weights_config.get(
+                    "symmetric", True
+                ) or not activation_config.get("symmetric", True):
+                    raise ValueError(
+                        f"compressed-tensors group {group_name} uses asymmetric INT8, "
+                        "but only symmetric W8A8 is supported"
+                    )
+                ignore_patterns = _read_ignore_patterns(
+                    quant_config, ("ignore", "exclude")
+                )
+                quant_method = CompressedW8A8Int8PerChannelQuantConfig.get_method()
+                return CompressedW8A8Int8PerChannelQuantConfig.from_config(
+                    {
+                        "bits": bits,
+                        "method": quant_method,
+                        "group_size": 0,
+                        "is_quanted": True,
+                        "ignore_patterns": ignore_patterns,
+                    }
+                )
+            elif (
+                weights_config["type"] == "int"
                 and bits == 4
                 and weights_config["strategy"] == "group"
             ):
                 # Kimi-K2.5 routed-expert MoE: int4 g32 symmetric, dyn fp8 act.
                 group_size = int(weights_config.get("group_size", 32))
-                ignore_patterns = quant_config.get("ignore", [])
+                ignore_patterns = _read_ignore_patterns(quant_config)
                 quant_method = (
                     CompressedW4A8Int4PerChannelQuantConfig.get_method()
                 )
@@ -801,6 +929,60 @@ class CompressedW4A8Int4PerChannelQuantConfig(QuantizationConfig):
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
         return CompressedW4A8Int4PerChannelQuantConfig(**config)
+
+
+class CompressedW8A8Int8PerChannelQuantConfig(QuantizationConfig):
+    """Pre-quantized compressed-tensors W8A8 INT8 configuration.
+
+    Weights are static symmetric INT8 per output channel and activations are
+    dynamically quantized to symmetric INT8 per token.
+    """
+
+    def __init__(
+        self,
+        bits: int = 8,
+        group_size: int = 0,
+        is_quanted: bool = True,
+        **kwargs: Any,
+    ):
+        assert (
+            bits == 8 and group_size == 0
+        ), f"invalid params {bits} != 8 or {group_size} != 0"
+        super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
+        self._ignore_patterns: List[str] = list(kwargs.get("ignore_patterns") or [])
+        # WeightModule support checks use exclude_modules for concrete checkpoint
+        # paths and {i}-templated model weight definitions.
+        self.exclude_modules = set(self._ignore_patterns)
+
+    @classmethod
+    def get_method(cls) -> str:
+        return "W8A8_INT8_PER_CHANNEL_COMPRESSED"
+
+    @classmethod
+    def get_algo(cls) -> str:
+        return "w8a8_int8_per_channel"
+
+    @property
+    def ignore_patterns(self) -> List[str]:
+        return self._ignore_patterns
+
+    def get_supported_compute_dtypes(self) -> List[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
+        # INT8 weight quantization does not constrain the KV cache dtype, so the
+        # same set as the sibling compressed W4A8 scheme is accepted.
+        return [torch.float16, torch.bfloat16, torch.float8_e4m3fn]
+
+    def get_moe_activation_quant_spec(self) -> Optional[Tuple[torch.dtype, bool]]:
+        # MoE experts must consume INT8 activations quantized per token; no MoE
+        # strategy ships that here yet, so the combination is rejected at
+        # selection time rather than failing inside a kernel.
+        return (torch.int8, True)
+
+    @classmethod
+    def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
+        return CompressedW8A8Int8PerChannelQuantConfig(**config)
 
 
 DEFAULT_FP8_BLOCK_WISE_QUANT_CONFIG = Fp8BlockWiseQuantConfig(

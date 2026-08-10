@@ -105,7 +105,14 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
         )
         quant_method = MoeConfigResolver().get_quant_method(self.config)
         use_fp4 = quant_method == "modelopt_fp4"
-        if use_fp8:
+        # Backends whose executors consume a quantized payload of a different
+        # dtype extend _dispatch_quant_dtypes and override _do_quant instead of
+        # reimplementing prepare().
+        quantize_dispatch = (
+            self.quant_config.is_quantized
+            and self.quant_config.quant_dtype in self._dispatch_quant_dtypes()
+        )
+        if quantize_dispatch:
             a1_quant, a1_scale_quant = self._do_quant(a1)
             assert a1_scale_quant is not None
             tp_expert_a1 = torch.narrow(a1_quant, 0, slice_begin, slice_size)
@@ -155,11 +162,14 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
 
         expert_x_scale: Optional[torch.Tensor] = None
         expert_x: torch.Tensor
-        if use_fp8:
+        if quantize_dispatch:
             assert isinstance(output, tuple), "output should be a tuple"
             expert_x, expert_x_scale = output
             # TODO: move it to the executor
-            if self.quant_config.is_per_act_token:
+            # Only FP8 per-token scales need this: _do_quant_fp8_per_token
+            # repeats one scale per 128-column block to satisfy the DeepEP
+            # dispatch layout, so the duplicated columns are dropped here.
+            if use_fp8 and self.quant_config.is_per_act_token:
                 expert_x_scale = expert_x_scale[:, 0].contiguous()
         else:
             assert isinstance(output, torch.Tensor), "output should be a tensor"
@@ -169,6 +179,12 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
             num_recv_tokens_per_expert_list, device=expert_x.device, dtype=torch.int32
         )
 
+        # Keyed off FP8/FP4 rather than "is the payload quantized" because this
+        # encodes an executor contract, not a payload property: the CUDA
+        # quantized executors consume partition-local expert ids and treat -1 as
+        # the padding sentinel, so recv_topk_idx must reach them untouched.
+        # Backends whose executors expect global expert ids (and re-derive the
+        # sentinel from their own partition range) take the remap below.
         if recv_topk_idx.numel() != 0 and (not use_fp8) and (not use_fp4):
             expert_topk_ids = torch.where(
                 recv_topk_idx == -1,
@@ -229,6 +245,14 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
 
         # out_token should be a tensor with shape and dtype like a1
         return out_token
+
+    def _dispatch_quant_dtypes(self) -> Tuple[torch.dtype, ...]:
+        """Payload dtypes prepare() can quantize activations to before dispatch.
+
+        Must stay in sync with the dtypes :meth:`_do_quant` handles; backends
+        override both together to add one.
+        """
+        return (torch.float8_e4m3fn,)
 
     def _do_quant(
         self, a1: torch.Tensor

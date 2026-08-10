@@ -2,7 +2,7 @@ import copy
 import functools
 import logging
 import re
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 
@@ -79,6 +79,15 @@ def _ckpt_base_matches_quant_exclude(
     Returns:
         True if the template (with '{i}' replaced by a wildcard for digits) matches any
         concrete path in 'exclude_modules'.
+
+    Note:
+        Matching is per weight *template*, not per layer instance, so excluding a
+        single layer (``model.layers.7.mlp.down_proj``) makes the template match
+        and therefore de-quantizes that weight in *every* layer. This is the
+        long-standing behaviour of the FP8 and W4A8 paths and is kept for
+        consistency: checkpoints seen so far exclude a module in all layers or in
+        none, and falling back to the unquantized loader stays numerically
+        correct -- only slower.
     """
     if not exclude_modules:
         return False
@@ -245,6 +254,9 @@ def create_w8a8_fp8_per_channel_weight(
 
 
 class PerChannelFp8Weight(CompositeWeight, QuantWeight):
+    weight_dtype = torch.float8_e4m3fn
+    apply_fp8_device_conversion = True
+
     w8a8_weight_list = {
         W.attn_qkv_w: W.attn_qkv_s,
         W.attn_o_w: W.attn_o_s,
@@ -259,20 +271,28 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
         W.attn_gate_w: W.attn_gate_s,
     }
 
+    # Quant config types this loader claims. Subclasses narrow it to their own
+    # scheme so exactly one loader matches a given config (see
+    # WeightModule.create, which rejects multiple valid classes).
+    supported_quant_config_types: Tuple[type, ...] = (
+        Fp8PerChannelCompressedQuantConfig,
+        Fp8PerChannelQuarkQuantConfig,
+    )
+
     @classmethod
     def support(
         cls, quant_config: QuantizationConfig, src_weight_info: WeightModule
     ) -> bool:
         if not quant_config.is_quanted() or not isinstance(
-            quant_config,
-            (Fp8PerChannelCompressedQuantConfig, Fp8PerChannelQuarkQuantConfig),
+            quant_config, cls.supported_quant_config_types
         ):
             return False
         name = src_weight_info.name
         if name not in cls.w8a8_weight_list:
             return False
-        if quant_config.exclude_modules and hasattr(src_weight_info, "weights"):
-            for ckpt_w in src_weight_info.weights:
+        ckpt_weights = getattr(src_weight_info, "weights", ())
+        if quant_config.exclude_modules and ckpt_weights:
+            for ckpt_w in ckpt_weights:
                 base_name = ckpt_w.name.rsplit(".", 1)[0]
                 if _ckpt_base_matches_quant_exclude(
                     base_name, quant_config.exclude_modules
@@ -349,7 +369,7 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
             W.attn_qkv_w,
             qkv_w_list,
             concat_0,
-            data_type=torch.float8_e4m3fn,
+            data_type=self.weight_dtype,
             config=src_weight_info.config,
         )
 
@@ -382,7 +402,7 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
             src_weight_info,
             W.attn_o_w,
             [CkptWeightInfo(w_name + QW_SUFFIX)],
-            data_type=torch.float8_e4m3fn,
+            data_type=self.weight_dtype,
             config=src_weight_info.config,
         )
         scale = create_w8a8_fp8_per_channel_weight(
@@ -416,7 +436,7 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
                         align_size=src_weight_info.config.align_size,
                         dim=0,
                     ),
-                    data_type=torch.float8_e4m3fn,
+                    data_type=self.weight_dtype,
                     config=src_weight_info.config,
                 ),
                 create_w8a8_fp8_per_channel_weight(
@@ -450,7 +470,7 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
                     align_size=src_weight_info.config.align_size,
                     dim=0,
                 ),
-                data_type=torch.float8_e4m3fn,
+                data_type=self.weight_dtype,
                 config=src_weight_info.config,
             )
             scale = create_w8a8_fp8_per_channel_weight(
@@ -476,7 +496,7 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
                     align_size=src_weight_info.config.align_size,
                     dim=1,
                 ),
-                data_type=torch.float8_e4m3fn,
+                data_type=self.weight_dtype,
                 config=src_weight_info.config,
             )
             scale = create_w8a8_fp8_per_channel_weight(
@@ -496,7 +516,7 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
             W.moe_w2,
             [CkptWeightInfo(w_name + QW_SUFFIX, identity)],
             stack_,
-            data_type=torch.float8_e4m3fn,
+            data_type=self.weight_dtype,
             config=src_weight_info.config,
         )
         scale = create_w8a8_fp8_per_channel_weight(
@@ -519,7 +539,7 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
                 for w in src_weight_info.weights
             ],
             stack_moe_w1,
-            data_type=torch.float8_e4m3fn,
+            data_type=self.weight_dtype,
             config=src_weight_info.config,
         )
         scale = create_w8a8_fp8_per_channel_weight(
@@ -553,7 +573,7 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
             [CkptWeightInfo(w_name + QW_SUFFIX, src_weight_info.weights[0].merge_fun)],
             identity,
             src_weight_info.config,
-            torch.float8_e4m3fn,
+            self.weight_dtype,
         )
 
         scale = W8A8Fp8PerChannelLinearAttnAtomicWeight(
@@ -590,7 +610,7 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
             ],
             merge_qkv_z,
             src_weight_info.config,
-            torch.float8_e4m3fn,
+            self.weight_dtype,
         )
 
         scale = W8A8Fp8PerChannelLinearAttnAtomicWeight(
@@ -612,7 +632,7 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
             src_weight_info,
             W.attn_gate_w,
             [CkptWeightInfo(w_name + QW_SUFFIX, src_weight_info.weights[0].merge_fun)],
-            data_type=torch.float8_e4m3fn,
+            data_type=self.weight_dtype,
             config=src_weight_info.config,
         )
         scale = create_w8a8_fp8_per_channel_weight(
@@ -651,11 +671,12 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
                 if scale_weight.dim() == 2
                 else scale_weight
             )
-            kernel_weight, scale_weight = (
-                load_config.exported_device.convert_fp8_weight_params(
-                    kernel_weight, scale_weight
+            if self.apply_fp8_device_conversion:
+                kernel_weight, scale_weight = (
+                    load_config.exported_device.convert_fp8_weight_params(
+                        kernel_weight, scale_weight
+                    )
                 )
-            )
             processed_res[self.scale.name] = scale_weight
             processed_res[self.kernel.name] = kernel_weight
 

@@ -188,11 +188,16 @@ class DeepepWrapperConfig:
         is_block_quantized = (
             quant_config is not None and quant_config.get_method() == "FP8_PER_BLOCK"
         )
+        # Methods whose activations are quantized per token, and therefore need
+        # the 16-token bucketing below. Membership only describes buffer sizing:
+        # it does not imply the low-latency router can dispatch that payload --
+        # DeepEpLowLatencyRouter still rejects every non-FP8 quantized dtype.
         is_per_act_token = quant_config is not None and quant_config.get_method() in (
             "FP8_PER_TENSOR_COMPRESSED",
             "FP8_DYNAMIC_PER_TENSOR",
             "W4A8_INT4_PER_CHANNEL",
             "W4A8_INT4_PER_CHANNEL_COMPRESSED",
+            "W8A8_INT8_PER_CHANNEL_COMPRESSED",
         )
         is_per_group_fp4 = (
             quant_config is not None and quant_config.get_method() == "modelopt_fp4"

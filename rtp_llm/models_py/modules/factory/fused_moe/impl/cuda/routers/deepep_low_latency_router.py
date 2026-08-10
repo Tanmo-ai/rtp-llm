@@ -204,8 +204,14 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
             ), "DeepEP Low-Latency only supports fp8 block quantization or per_act_token quantization with ACCL-EP"
         elif self.quant_config.is_per_group_fp4:
             pass
-        else:
-            assert not self.quant_config.is_quantized
+        elif self.quant_config.is_quantized:
+            # Reaching here would dispatch the payload as BF16 while the buffers
+            # were sized for its per-act-token bucketing, so the result would be
+            # silently wrong rather than merely slow.
+            raise ValueError(
+                "DeepEP low-latency dispatch has no path for quant_dtype="
+                f"{self.quant_config.quant_dtype}"
+            )
         # Check handle
         assert self._handle is None
 

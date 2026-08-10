@@ -384,6 +384,9 @@ class ModelFactory:
         propose_model_args.act_type = model_args.act_type
         propose_model_args.mla_ops_type = model_args.mla_ops_type
         propose_model_args.enable_fp32_lm_head = model_args.enable_fp32_lm_head
+        propose_model_args.enable_independent_kv_cache_pools = (
+            model_args.enable_independent_kv_cache_pools
+        )
 
         # Create propose ModelConfig using _create_config
         propose_model_cls = ModelFactory.get_model_cls(sp_config.model_type)

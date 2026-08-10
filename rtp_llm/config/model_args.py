@@ -29,6 +29,7 @@ class ModelArgs:
         "json_model_override_args",
         "phy2log_path",
         "enable_fp32_lm_head",
+        "enable_independent_kv_cache_pools",
     ]
 
     def __init__(self):
@@ -59,3 +60,6 @@ class ModelArgs:
 
         # LM head precision
         self.enable_fp32_lm_head: Optional[bool] = None
+
+        # KV cache pool layout
+        self.enable_independent_kv_cache_pools: Optional[bool] = None

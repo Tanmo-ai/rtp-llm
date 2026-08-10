@@ -888,6 +888,10 @@ def build_model_config(
         ssm_state_dtype_str_to_data_type(kv_cache_config.ssm_state_dtype)
     )
     model_config.linear_attention_config.conv_state_dtype = model_config.data_type
+    if model_args.enable_independent_kv_cache_pools is not None:
+        model_config.hybrid_attention_config.enable_independent_kv_cache_pools = (
+            model_args.enable_independent_kv_cache_pools
+        )
 
     model_config.use_kvcache = model_config.task_type == TaskType.LANGUAGE_MODEL
     logging.info(

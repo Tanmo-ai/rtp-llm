@@ -65,6 +65,7 @@ from rtp_llm.server.server_args.speculative_decoding_group_args import (
     init_speculative_decoding_group_args,
 )
 from rtp_llm.server.server_args.vit_group_args import init_vit_group_args
+from rtp_llm.utils.import_util import import_optional_internal_source_entrypoint
 
 _T = TypeVar("_T")
 
@@ -512,6 +513,9 @@ def setup_args(args: Optional[Sequence[str]] = None) -> PyEnvConfigs:
     capacity estimator, reuse the exact same parser and config bindings without
     temporarily replacing global process arguments.
     """
+    # Internal backends must register parser and factory hooks before the
+    # corresponding public argument groups and factories are initialized.
+    import_optional_internal_source_entrypoint("models_py")
     parser = EnvArgumentParser(description="RTP LLM")
 
     # 先创建配置对象

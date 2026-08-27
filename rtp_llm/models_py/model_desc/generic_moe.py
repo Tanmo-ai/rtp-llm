@@ -80,6 +80,8 @@ class GenericMoeLayer(nn.Module):
             moe_config=moe_config,
             quant_config=quant_config,
             enable_cuda_graph=enable_cuda_graph,
+            hw_kernel_config=hw_kernel_config,
+            max_generate_batch_size=max_generate_batch_size,
         )
         self.fused_moe = FusedMoeFactory().create_fused_moe(config_adapter, weights)
         router = self.fused_moe.router

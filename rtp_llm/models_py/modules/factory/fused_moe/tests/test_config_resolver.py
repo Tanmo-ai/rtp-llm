@@ -23,6 +23,8 @@ def create_config_adapter(
     use_deepep_low_latency: bool = False,
     data_type: str = "fp16",
     cp_enabled: bool = False,
+    hw_kernel_config=None,
+    max_generate_batch_size=None,
 ) -> MoEConfigAdapter:
     """Helper function to create MoEConfigAdapter for testing"""
     model_config = ModelConfig()
@@ -53,6 +55,8 @@ def create_config_adapter(
         model_config=model_config,
         parallelism_config=parallelism_config,
         moe_config=moe_config,
+        hw_kernel_config=hw_kernel_config,
+        max_generate_batch_size=max_generate_batch_size,
     )
 
 
@@ -71,6 +75,14 @@ class TestMoeConfigResolver(unittest.TestCase):
             mock_get_device_type.return_value = DeviceType.Cuda
             device_type = self.resolver.get_device_type()
             self.assertEqual(device_type, DeviceType.Cuda)
+
+    def test_runtime_context_is_preserved(self):
+        hw_kernel_config = object()
+        config = create_config_adapter(
+            hw_kernel_config=hw_kernel_config, max_generate_batch_size=64
+        )
+        self.assertIs(config.hw_kernel_config, hw_kernel_config)
+        self.assertEqual(config.max_generate_batch_size, 64)
 
     def test_has_quantization_false(self):
         """Test case without quantization"""
